@@ -266,3 +266,158 @@ TotalPrice = dfDetail.select('*',(dfDetail.UnitPrice*dfDetail.OrderQty*(1-dfDeta
                 .withColumnRenamed('sum(netprice)','TotalPrice')
 
 ```
+
+```python
+
+#!/usr/bin/python
+# -*- coding: UTF-8 -*-
+from __future__ import division
+import csv
+import random
+from pyspark import SparkContext
+from pyspark.sql import SQLContext
+from pyspark.sql.functions import *
+import time
+
+
+def genTransactions(inpath):
+    """ Generates a list of transactions, where each transaction is a set of items. 
+    """
+    ids, ts = list(), list()
+    with open(inpath, 'r') as f:
+        for line in f:
+            i, t = line.strip().split('\t')
+            ids.append(i)
+            ts.append(set(t.split(',')))
+    return ids, ts
+
+
+def prune(curr, F):
+    for i in curr:
+        tmp = curr - {i}
+        if not tmp in F: return False
+    return True
+
+
+def genCand(F):
+    C = set()
+    s = len(F[0]) + 1
+    for i in xrange(len(F)-1): 
+        for j in xrange(i+1, len(F)):
+            curr = F[i].union(F[j])
+            if len(curr) == s:
+                C.add(curr) # tuple: (frozenset(shared_elems), new_elem)
+    return list(C)
+
+
+def getSupport(x, n, values):
+    c = 0
+    for t in values:
+        if x.issubset(t):
+            c += 1
+    return (frozenset(x), c/n)
+
+
+def check(x, values):
+    for v in values:
+        if x.issubset(v):
+            return (frozenset([x]),1)
+    return (frozenset([x]),0)
+
+
+
+def genToyTransactions():
+    """ Generates a list of transactions, where each transaction is a set of items. 
+    """
+    T = list()
+    T.append({1,3,4})
+    T.append({2,3,5})
+    T.append({1,2,3,5})
+    T.append({2,5})
+    return T
+
+
+sc = SparkContext()
+
+def apriori(T,minsup,niters):
+
+    n = float(len(T))
+    results = dict() #results[k] saves k-item frequent set
+
+    trans = sc.parallelize(T,NUM_PARTITIONS)
+    trans_set = trans.map(lambda x: frozenset(x)).cache()
+
+    # Gets one-item candidate set
+    trans_set_one = trans.flatMap(lambda x: x)
+    unique_one = trans_set_one.map(lambda x: (frozenset([x]),1)).reduceByKey(lambda x,y:x+y)
+
+    # Gets one-item frequent set
+    freq_set_values = unique_one.filter(lambda x: x[1]/n>=minsup)
+    freq_set_one = freq_set_values.map(lambda x:x[0]).collect()
+    trans_set_bc = sc.broadcast(trans_set.collect())
+
+    c = 1
+    results[c] = freq_set_one
+    while c < niters+1:
+        if len(results[c]) == 0:
+            print c
+            break
+        print ('== %s th iteration ==' % str(c))
+        t0 = time.time()
+        cand = genCand(results[c])
+        print 'join set time = ', time.time() - t0
+        candidates = sc.parallelize(cand,NUM_PARTITIONS)
+        # result_c_bc = sc.broadcast(results[c])
+        # cand_set_pruned = candidates.filter(lambda x: prune(x,result_c_bc.value)).cache()
+        cand_set_pruned = candidates.filter(lambda x: prune(x,results[c])).cache()
+
+        t0 = time.time()
+        freq_set = cand_set_pruned\
+                               .map(lambda x: getSupport(x, n, trans_set_bc.value))\
+                                                   .filter(lambda x:x[1]>=minsup)\
+                                                                .map(lambda x: x[0]).collect()
+        # freq_set = cand_set_pruned.map(lambda x: check(x, trans_set_bc.value)).reduceByKey(lambda x,y:x+y).filter(lambda x:x[1]/n>=minsup).map(lambda x: x[0]).collect()
+
+        print 'freq time = ', time.time()-t0
+
+        c += 1
+        results[c] = freq_set
+    return results 
+
+NUM_PARTITIONS = 1
+if __name__ == '__main__':
+    
+    minsup = 0.001 #minimum support ratio
+    niters = 2 #number of iterations
+    maxlength = 5
+    
+
+    inpath = 'data1/transactions.txt'
+    ids, T = genTransactions(inpath)
+    del ids
+    newT = list()
+    for i in range(len(T)):
+        if len(T[i]) < maxlength:
+            newT.append(T[i])
+    T = newT
+    
+
+    # T = genToyTransactions()
+
+    print '\nNUM PARTITIONS: ', NUM_PARTITIONS
+    print 'MUN TRANSACTIONS = ', len(T)
+    print 'MINSUP = ', minsup
+    print 
+
+    t_start = time.time()
+    results = apriori(T,minsup,niters)
+    t_end = time.time()
+    # print results 
+    print 'TOTAL TIME USED = ', t_end-t_start
+
+    # print results
+
+
+
+
+```
